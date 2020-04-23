@@ -8,6 +8,10 @@ const productData = require("./data/items.json");
 const _ = require("lodash");
 const { simulateProblems, getCountryList } = require("./helpers.js");
 const PORT = 4000;
+const { MongoClient } = require('mongodb');
+// const assert = require('assert');
+// const fs = require('file-system');
+
 express()
   .use(function (req, res, next) {
     res.header(
@@ -20,158 +24,278 @@ express()
     );
     next();
   })
+
   .use(morgan("tiny"))
   .use(express.static("./server/assets"))
   .use(bodyParser.json())
   .use(express.urlencoded({ extended: false }))
   .use("/", express.static(__dirname + "/"))
 
+
+
   // REST endpoints
 
-  //---Gets Country List in an Array---//
+  //---Gets unique country list in an Array---//
 
-  .get("/countries", (req, res) => {
-    const uniqueCountries = getCountryList();
-    res.status(200).send({ countries: uniqueCountries });
+  .get("/countries", async (req, res) => {
+    const client = new MongoClient('mongodb://localhost:27017', {
+      useUnifiedTopology: true,
+    })
+    let uniqueCountries = null; //= getCountryList();
+    const sendCountries = async () => {
+      console.log("***In sendCountries...")
+      try {
+        await client.connect();
+        console.log('connected!');
+        const db = await client.db('dragonRiders');
+        db.collection('companies').find().toArray((err, result) => {
+          if (!!result) {
+            uniqueCountries = []
+            result.map((company) => {
+              ;
+              if (uniqueCountries.indexOf(company.country) === -1) {
+                uniqueCountries.push(company.country);
+              }
+            })
+          }
+          res.status(200).send({ data: uniqueCountries });
+          client.close();
+          console.log('disconnected!');
+        });
+      }
+      catch (err) {
+        console.log(err.stack);
+        res.status(400).send({ err });
+      }
+    }
+    await sendCountries();
   })
 
-  //DO NOT USE THIS ENDPOINT.... YET. Could be used for a company page...
-
-  .get("/companies/:country", (req, res) => {
-    const { country } = req.params;
-    const companiesByCountry = companyData.filter((company) => {
-      return (
-        company.country.replace(" ", "").toLowerCase() === country.toLowerCase()
-      );
-    });
-    return simulateProblems(res, { companies: companiesByCountry });
-  })
 
   //----Gets the Products by each country----//
-  .get("/products/:country", (req, res) => {
-    const { country } = req.params;
-    const countryList = getCountryList().map((country) => {
-      return country.toLowerCase();
-    });
 
-    if (countryList.includes(country.toLowerCase())) {
-      const companiesIdByCountry = companyData
-        .map((company) => {
-          if (
-            company.country.replace(" ", "").toLowerCase() ===
-            country.replace(" ", "").toLowerCase()
-          ) {
-            return company.id;
-          }
-        })
-        .filter((id) => id !== undefined);
-      const productsByCountry = companiesIdByCountry.map((id) => {
-        return productData.filter((product) => {
-          return product.companyId === id;
-        });
-      });
-      return simulateProblems(res, { products: _.flatten(productsByCountry) });
-    } else {
-      res.status(404).send({
-        error: `We either don't sell in that country or we couldn't find what you're looking for.`,
-      });
+  .get("/products/:country", async (req, res) => {
+    const { country } = req.params;
+    const client = new MongoClient('mongodb://localhost:27017', {
+      useUnifiedTopology: true,
+    });
+    // console.log('country', country)
+    try {
+      await client.connect();
+      const db = client.db('dragonRiders');
+
+      const companies = await db.collection('companies')
+        .find({ country: country }).toArray();
+      // console.log('commpanies', companies)
+      //[{id1,...},{id2...}]
+      //[id1,id2]     
+      const companiesFound = companies.map(company => {
+        return company._id
+      })
+      console.log('companiesFound', companiesFound)
+      //{ $in: [<value1>, <value2>, ... <valueN> ] }
+      const productsByCountry = await db.collection('items')
+        .find({ companyId: { $in: companiesFound } }).toArray();
+      // console.log('productsByCountry', productsByCountry)
+      // [{},{}]
+      const productsByCountryObject = {};
+      productsByCountry.map((product) => {
+        productsByCountryObject[product._id] = product
+      })
+      // console.log("***final object: ", productsByCountryObject)
+      // const objProdByCountry = {}
+      // const result = productsByCountry.forEach(product => {
+      //   product = Object.values(_id)
+      // })
+      res.send({ productsByCountryObject })
     }
+
+    catch (err) {
+      console.log(err.stack);
+      res.status(400).send({ err });
+    }
+
   })
 
-  .get("/products/detail/:productId", (req, res) => {
+  .get("/products/detail/:productId", async (req, res) => {
     const { productId } = req.params;
-    const product = productData.find(
-      (product) => product.id === parseInt(productId)
-    );
-    if (product) {
-      return simulateProblems(res, { product });
-    } else {
-      return simulateProblems(res, { message: "Product not found." });
+    const client = new MongoClient('mongodb://localhost:27017', {
+      useUnifiedTopology: true,
+    });
+    try {
+
+      await client.connect();
+      const db = client.db('dragonRiders');
+
+      db.collection('items')
+        .findOne({ _id: parseInt(productId) }, (err, result) => {
+          result
+            ? res.status(200).json({ status: 200, productId, data: result })
+            : res.status(404).json({ status: 404, productId, data: 'Not Found' });
+          client.close();
+        });
+    }
+    catch (err) {
+      console.log(err.stack);
+      res.status(400).send({ err });
     }
   })
 
   //---A countries Featured Products, Sorted By Lowest Price---//
 
-  .get("/countries/:country/featuredproducts", (req, res) => {
+  .get("/countries/:country/featuredproducts", async (req, res) => {
     const { country } = req.params;
-    const companiesIdByCountry = companyData
-      .map((company) => {
-        if (
-          company.country.replace(" ", "").toLowerCase() ===
-          country.toLowerCase()
-        ) {
-          return company.id;
+    const client = new MongoClient('mongodb://localhost:27017', {
+      useUnifiedTopology: true,
+    });
+    // console.log('country', country)
+    try {
+      await client.connect();
+      const db = client.db('dragonRiders');
+
+      const companies = await db.collection('companies')
+        .find({ country: country }).toArray();
+      // console.log('commpanies', companies)
+
+      const companiesFound = companies.map(company => {
+        return company._id
+      })
+      console.log('companiesFound', companiesFound)
+
+      const productsByCountry = await db.collection('items')
+        .find({ companyId: { $in: companiesFound } }).toArray();
+      // console.log('productsByCountry', productsByCountry)
+
+      const productsByCountryObject = [];
+
+      productsByCountry.map((product, index) => {
+        // console.log('product', product)
+        const prodPrice = parseFloat(product.price.slice(1));
+        if (prodPrice < 20) {
+
+          productsByCountryObject.push(product)
         }
       })
-      .filter((id) => id !== undefined);
-    const productsByCountry = companiesIdByCountry.map((id) => {
-      return productData.filter((product) => {
-        return product.companyId === id;
-      });
-    });
-    const lowestPrices = _.flatten(productsByCountry).filter((product) => {
-      if (product.numInStock > 0) {
-        let newPrice = product.price.slice(1);
-        return parseFloat(newPrice) < 20;
-      }
-    });
-    return simulateProblems(res, { features: lowestPrices });
+
+      res.send(productsByCountryObject)
+    }
+
+    catch (err) {
+      console.log(err.stack);
+      res.status(400).send({ err });
+    }
+
   })
 
   //Order-Form Validation
 
-  .post("/order", (req, res) => {
+  .post("/order", async (req, res) => {
+
     const { order_summary } = req.body;
-    if (!order_summary.length) {
-      return res.status(400).send({ message: "Failure" });
-    }
-    const isOrderSuccessful = _.flatten(order_summary).map((item) => {
-      if (!item.item_id || !item.quantity) {
-        return false;
-      }
-      return productData
-        .filter((product) => product.id === item.item_id)
-        .map((orderItem) => {
-          if (orderItem.numInStock - item.quantity >= 0) {
-            orderItem.numInStock -= item.quantity;
-            return true;
-          } else if (orderItem.numInStock - item.quantity <= 0) {
-            return false;
-          }
-        });
+    const client = new MongoClient("mongodb://localhost:27017", {
+      useUnifiedTopology: true,
     });
-    if (_.flatten(isOrderSuccessful).includes(false)) {
-      return res.status(400).send({ message: "Failure" });
-    } else {
-      return res.status(200).send({ message: "Successful Purchase!" });
+    if (!order_summary.length) {
+      return res.status(400).json({ message: "Bad Request" });
     }
+    try {
+      await client.connect();
+      console.log("connected--handleOrder");
+      const db = client.db("dragonRiders");
+      const productById = order_summary.map((product) => {
+        return product.item_id;
+      });
+      const products = await db
+        .collection("items")
+        .find({ _id: { $in: productById } })
+        .toArray();
+      let areAllProductsAvailable = false;
+      await products.forEach((product, i) => {
+        if (product.numInStock >= order_summary[i].quantity) {
+          areAllProductsAvailable = true;
+        } else {
+          areAllProductsAvailable = false;
+        }
+      });
+      console.log(areAllProductsAvailable);
+      if (areAllProductsAvailable) {
+        await order_summary.forEach(async (product) => {
+          await db
+            .collection("items")
+            .updateOne(
+              { _id: product.item_id },
+              { $inc: { numInStock: -product.quantity } }
+            );
+        });
+        client.close();
+        return res.status(200).json({ message: "Successful Purchase!" });
+      } else {
+        client.close();
+        return res.status(400).json({ message: "Failure" });
+      }
+    } catch (err) {
+      console.log(err);
+    }
+    client.close();
+    console.log("closed");
   })
 
   //---Gets Categories, Organized by Country---//
 
-  .get("/categories/:country", (req, res) => {
+  .get("/categories/:country", async (req, res) => {
     const { country } = req.params;
-    const companiesIdByCountry = companyData
-      .map((company) => {
-        if (
-          company.country.replace(" ", "").toLowerCase() ===
-          country.toLowerCase()
-        ) {
-          return company.id;
-        }
+    const client = new MongoClient('mongodb://localhost:27017', {
+      useUnifiedTopology: true,
+    });
+
+    try {
+      await client.connect();
+      const db = client.db('dragonRiders');
+
+      const companies = await db.collection('companies')
+        .find({ country: country }).toArray();
+      // console.log('commpanies', companies)
+
+      const companiesFound = companies.map(company => {
+        return company._id
       })
-      .filter((id) => id !== undefined);
-    const productsByCountry = companiesIdByCountry.map((id) => {
-      return productData.filter((product) => {
-        return product.companyId === id;
-      });
-    });
-    const productsByCategories = _.flatten(productsByCountry).map((product) => {
-      return product.category;
-    });
-    return simulateProblems(res, {
-      categories: Array.from(new Set(productsByCategories)),
-    });
+      console.log('companiesFound', companiesFound)
+
+      const productsByCountry = await db.collection('items')
+        .find({ companyId: { $in: companiesFound } }).toArray();
+      // console.log('productsByCountry', productsByCountry)
+
+      const productsByCountryObject = {};
+      productsByCountry.map((product) => {
+        productsByCountryObject[product._id] = product
+      })
+      // console.log("***final object: ", productsByCountryObject)
+
+      res.send({ productsByCountryObject })
+
+      // Search unique categories in collection items with companyId
+      let uniqueCategories = null;
+      const categoriesByCountry = await db.collection('items')
+        .find({ category: { $in: companiesFound } }).toArray();
+      console.log('categoriesByCountry', categoriesByCountry)
+
+      const categoriesByCountryObject = [];
+      if (uniqueCategories.indexOf(category.category) === -1) {
+        categoriesByCountry.map((category, index) => {
+
+          categoriesByCountryObject.push(category)
+
+        })
+
+        res.send(categoriesByCountryObject)
+      }
+    }
+
+    catch (err) {
+      console.log(err.stack);
+      res.status(400).send({ err });
+    }
+
   })
 
   .listen(PORT, () => console.info(`Listening on port ${PORT}`));
